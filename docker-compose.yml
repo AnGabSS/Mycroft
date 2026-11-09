@@ -1,0 +1,86 @@
+name: mycroft
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mycroft}
+      POSTGRES_USER: ${POSTGRES_USER:-mycroft}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mycroft}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    environment:
+      # Keep the model loaded between jobs (Ollama unloads after 5 minutes idle by default)
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-24h}
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    # Uncomment to use an NVIDIA GPU (requires nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # One-shot job that pulls the configured model into the shared volume (fast no-op when already present).
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama"]
+    command: ["pull", "${OLLAMA_MODEL:-llama3.2:3b}"]
+    restart: "no"
+
+  mycroft-api:
+    build: .
+    image: mycroft-api:local
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+    ports:
+      # Published on localhost only by default. To expose it to the network, set MYCROFT_BIND_ADDRESS=0.0.0.0
+      # AND MYCROFT_API_KEY.
+      - "${MYCROFT_BIND_ADDRESS:-127.0.0.1}:${MYCROFT_PORT:-8080}:8080"
+    environment:
+      ConnectionStrings__Mycroft: Host=postgres;Port=5432;Database=${POSTGRES_DB:-mycroft};Username=${POSTGRES_USER:-mycroft};Password=${POSTGRES_PASSWORD:-mycroft}
+      MYCROFT_API_KEY: ${MYCROFT_API_KEY:-}
+      OLLAMA_ENDPOINT: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+      MAX_CONCURRENT_SLM_REQUESTS: ${MAX_CONCURRENT_SLM_REQUESTS:-1}
+      SLM_CHUNK_SIZE: ${SLM_CHUNK_SIZE:-8}
+      SLM_REQUEST_TIMEOUT_SECONDS: ${SLM_REQUEST_TIMEOUT_SECONDS:-600}
+      SLM_WARMUP: ${SLM_WARMUP:-true}
+      SLM_AUTO_LEARN: ${SLM_AUTO_LEARN:-false}
+      NEEDS_REVIEW_THRESHOLD: ${NEEDS_REVIEW_THRESHOLD:-0.70}
+      MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-10}
+      MAX_ITEMS_PER_JOB: ${MAX_ITEMS_PER_JOB:-2000}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+      RETENTION_DAYS: ${RETENTION_DAYS:-7}
+      WEBHOOK_DEFAULT_SECRET: ${WEBHOOK_DEFAULT_SECRET:-}
+      WEBHOOK_TIMEOUT_SECONDS: ${WEBHOOK_TIMEOUT_SECONDS:-15}
+
+volumes:
+  postgres-data:
+  ollama-models:
